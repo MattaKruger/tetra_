@@ -9,44 +9,31 @@ from ray import serve
 
 from transformers import pipeline
 
+from models import Response, UserResponse, EconsultType
+
 app = FastAPI()
-dutch_address_regex = "^(\d{4}[A-Z]{2}) ([\w\.'\/\- ]+) (\w?[0-9]+[a-zA-Z0-9\- ]*)"
-
-
-class Response(BaseModel):
-    sequence: str
-    labels: List[str]
-    scores: List[float]
-    response: str
-
-
-class EconsultType(str, Enum):
-    # TODO look at optimizing to_list initialize
-    # when adding new types also add them to the to_list method
-    address_change = "address_change"
-    medication = "medication"
-    insurance = "insurance"
-
-    @staticmethod
-    def to_list() -> List[str]:
-        return ["address_change", "medication", "insurance"]
 
 
 #  Create user response
-def construct_response_message(message_type: str, text: str):
+def construct_response_message(message_type: str, text: str) -> str:
     if message_type == EconsultType.address_change:
         return f"Zal ik je adres wijziging doorvoeren? Nieuw adres: {text}"
     if message_type == EconsultType.medication:
         return f"Zal ik dit recept voor je aanmaken? Recept voor {text}"
+    return ""
 
 
+# Create task and pass to t5 model to extract useful info.
+# The flan model handels questions fairly well.
 def construct_task(message_type: str, context):
     if message_type == EconsultType.address_change:
-        return f"task: Extract address from given text, text: {context}"
+        return f"task: Please answer to the following question. What is the dutch address from this sentence: {context}"
     if message_type == EconsultType.medication:
-        return f"task: Extract medication from given text, text: {context}"
+        return f"task: Please answer to the following question. What is the medication and amount from this sentence: {context}"
 
 
+# We use a BERT based model to classify type of E-consult.
+# We're able to use english labels to classify dutch text, so no extra translation is needed.
 def classifier(prompt: str) -> str:
     classifier = pipeline(
         "zero-shot-classification",
@@ -59,9 +46,9 @@ def classifier(prompt: str) -> str:
     return response["labels"][0]  # type: ignore
 
 
-def extractor(econsult_type: str, context: str):
+def extractor(econsult_type: str, context: str) -> str:
     task_pipe = pipeline(
-        "text2text-generation", model="google/flan-t5-base", max_new_tokens=50
+        "text2text-generation", "google/flan-t5-large", max_new_tokens=50
     )
     task = construct_task(econsult_type, context)
     return task_pipe(task)[0]["generated_text"]  # type: ignore
@@ -76,9 +63,10 @@ class MyFastAPIDeployment:
         extracted_information = extractor(
             econsult_type=econsult_type, context=prompt  # type: ignore
         )
-        return construct_response_message(
+        user_message = construct_response_message(
             message_type=econsult_type, text=extracted_information  # type: ignore
         )
+        return UserResponse(response=user_message, extracted_info=extracted_information)
 
 
 app = MyFastAPIDeployment.bind()
